@@ -89,6 +89,11 @@ type CertificateSpec struct {
 	// Tags to associate with this certificate
 	// +optional
 	Tags map[string]string `json:"tags,omitempty"`
+
+	// SkipDNSValidation instructs the synthesizer to call Create/Delete instead of
+	// CreateWithValidationRecords/DeleteWithValidationRecords, leaving Route53 management
+	// to external tooling.
+	SkipDNSValidation bool `json:"skipDNSValidation,omitempty"`
 }
 
 // CertificateStatus defines the observed state of Certificate

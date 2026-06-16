@@ -248,3 +248,69 @@ func Test_buildACMCertificates(t *testing.T) {
 		})
 	}
 }
+
+func Test_buildCertificateSkipDNSValidation(t *testing.T) {
+	ing := func(annotations map[string]string) *ClassifiedIngress {
+		return &ClassifiedIngress{
+			Ing: &networking.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace:   "ns",
+					Name:        "ing",
+					Annotations: annotations,
+				},
+				Spec: networking.IngressSpec{
+					Rules: []networking.IngressRule{{Host: "example.com"}},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name                     string
+		acmCertSkipDNSValidation bool   // controller-level flag
+		annotations              map[string]string
+		want                     bool
+	}{
+		{
+			name:                     "controller flag=false, no annotation: no skip",
+			acmCertSkipDNSValidation: false,
+			annotations:              map[string]string{},
+			want:                     false,
+		},
+		{
+			name:                     "controller flag=true: skip regardless of annotation",
+			acmCertSkipDNSValidation: true,
+			annotations:              map[string]string{"alb.ingress.kubernetes.io/acm-cert-manage-dns-validation": "true"},
+			want:                     true,
+		},
+		{
+			name:                     "controller flag=false, annotation=false: skip",
+			acmCertSkipDNSValidation: false,
+			annotations:              map[string]string{"alb.ingress.kubernetes.io/acm-cert-manage-dns-validation": "false"},
+			want:                     true,
+		},
+		{
+			name:                     "controller flag=false, annotation=true: no skip",
+			acmCertSkipDNSValidation: false,
+			annotations:              map[string]string{"alb.ingress.kubernetes.io/acm-cert-manage-dns-validation": "true"},
+			want:                     false,
+		},
+		{
+			name:                     "controller flag=true, no annotation: skip",
+			acmCertSkipDNSValidation: true,
+			annotations:              map[string]string{},
+			want:                     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			task := &defaultModelBuildTask{
+				annotationParser:         annotations.NewSuffixAnnotationParser("alb.ingress.kubernetes.io"),
+				acmCertSkipDNSValidation: tt.acmCertSkipDNSValidation,
+			}
+			got := task.buildCertificateSkipDNSValidation(t.Context(), ing(tt.annotations))
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

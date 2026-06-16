@@ -12,6 +12,7 @@ const (
 	flagAllowedCAArns                        = "allowed-certificate-authority-arns"
 	flagEnableACMCertificates                = "enable-acm-certificates"
 	flagDefaultPCAARN                        = "default-pca-arn"
+	flagACMCertSkipDNSValidation             = "acm-cert-skip-dns-validation"
 	defaultIngressClass                      = "alb"
 	defaultDisableIngressClassAnnotation     = false
 	defaultDisableIngressGroupNameAnnotation = false
@@ -52,6 +53,11 @@ type IngressConfig struct {
 
 	// ACM Certificates Management feature
 	DefaultPCAArn string
+
+	// ACMCertSkipDNSValidation disables Route53 record management for all certificates
+	// created by this controller instance. When true, per-Ingress annotations are ignored
+	// and Route53 is never called.
+	ACMCertSkipDNSValidation bool
 }
 
 // BindFlags binds the command line flags to the fields in the config object
@@ -70,4 +76,6 @@ func (cfg *IngressConfig) BindFlags(fs *pflag.FlagSet) {
 		"Tolerate rules that specify a non-existent backend action")
 	fs.StringSliceVar(&cfg.AllowedCertificateAuthorityARNs, flagAllowedCAArns, []string{}, "Specify an optional list of CA ARNs to filter on in cert discovery")
 	fs.StringVar(&cfg.DefaultPCAArn, flagDefaultPCAARN, defaultDefaultPCAArn, "Default PCA ARN to use for creating ACM certificates")
+	fs.BoolVar(&cfg.ACMCertSkipDNSValidation, flagACMCertSkipDNSValidation, false,
+		"Disable Route53 DNS record management for ACM certificates; delegate validation to external tooling")
 }

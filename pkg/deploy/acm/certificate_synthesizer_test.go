@@ -576,6 +576,242 @@ func Test_Synthesizer(t *testing.T) {
 	}
 }
 
+func Test_Synthesizer_SkipDNSValidation(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := logr.New(&log.NullLogSink{})
+
+	tests := []struct {
+		name              string
+		skipDNSValidation bool // controller-level flag
+		setup             func(core.Stack, *services.MockACM, *services.MockRoute53, *tracking.MockProvider)
+		checkStack        func(s core.Stack)
+		wantErr           error
+	}{
+		{
+			name:              "skip-DNS via controller flag: new cert created without Route53 calls",
+			skipDNSValidation: true,
+			setup: func(s core.Stack, mockACM *services.MockACM, mockRoute53 *services.MockRoute53, mockTracking *tracking.MockProvider) {
+				acmModel.NewCertificate(s, "amazon_issued/example.com", acmModel.CertificateSpec{
+					Type:                    acmtypes.CertificateTypeAmazonIssued,
+					DomainName:              "example.com",
+					SubjectAlternativeNames: []string{"example.com"},
+					ValidationMethod:        acmtypes.ValidationMethodDns,
+					Tags:                    map[string]string{},
+					SkipDNSValidation:       true,
+				})
+
+				mockTracking.EXPECT().StackTags(gomock.Any()).Return(map[string]string{"foo": "bar"})
+				mockTracking.EXPECT().StackTagsLegacy(gomock.Any()).Return(map[string]string(nil))
+				mockACM.EXPECT().ListCertificatesAsList(gomock.Any(), gomock.Eq(&acm.ListCertificatesInput{})).
+					Return([]acmtypes.CertificateSummary{}, nil)
+				mockTracking.EXPECT().ResourceIDTagKey().Return("foo")
+				mockTracking.EXPECT().ResourceTags(gomock.Any(), gomock.Any(), gomock.Any()).
+					Return(map[string]string{"foo": "bar"})
+				mockACM.EXPECT().RequestCertificateWithContext(gomock.Any(), gomock.Eq(&acm.RequestCertificateInput{
+					DomainName:              awssdk.String("example.com"),
+					ValidationMethod:        acmtypes.ValidationMethodDns,
+					SubjectAlternativeNames: []string{"example.com"},
+					Tags:                    []acmtypes.Tag{{Key: awssdk.String("foo"), Value: awssdk.String("bar")}},
+				})).Return(&acm.RequestCertificateOutput{CertificateArn: awssdk.String("arn-1")}, nil)
+				// No Route53 calls expected
+				mockACM.EXPECT().WaitForCertificateIssuedWithContext(gomock.Any(), gomock.Eq("arn-1"), gomock.AssignableToTypeOf(time.Second)).Return(nil)
+			},
+			checkStack: func(s core.Stack) {
+				var resCerts []*acmModel.Certificate
+				err := s.ListResources(&resCerts)
+				assert.NoError(t, err)
+				assert.Len(t, resCerts, 1)
+				arn, err := resCerts[0].CertificateARN().Resolve(t.Context())
+				assert.NoError(t, err)
+				assert.Equal(t, "arn-1", arn)
+			},
+		},
+		{
+			name:              "skip-DNS via per-cert field: reissue uses Delete/Create without Route53",
+			skipDNSValidation: false,
+			setup: func(s core.Stack, mockACM *services.MockACM, mockRoute53 *services.MockRoute53, mockTracking *tracking.MockProvider) {
+				acmModel.NewCertificate(s, "amazon_issued/example.com", acmModel.CertificateSpec{
+					Type:                    acmtypes.CertificateTypeAmazonIssued,
+					DomainName:              "example.com",
+					SubjectAlternativeNames: []string{"example.com"},
+					ValidationMethod:        acmtypes.ValidationMethodDns,
+					Tags:                    map[string]string{},
+					SkipDNSValidation:       true,
+				})
+
+				mockTracking.EXPECT().StackTags(gomock.Any()).Return(map[string]string{"foo": "bar"})
+				mockTracking.EXPECT().StackTagsLegacy(gomock.Any()).Return(map[string]string(nil))
+				mockACM.EXPECT().ListCertificatesAsList(gomock.Any(), gomock.Eq(&acm.ListCertificatesInput{})).
+					Return([]acmtypes.CertificateSummary{{
+						CertificateArn:                  awssdk.String("arn-1"),
+						DomainName:                      awssdk.String("example.com"),
+						SubjectAlternativeNameSummaries: []string{"example.com"},
+						Type:                            acmtypes.CertificateTypeAmazonIssued,
+						CreatedAt:                       awssdk.Time(time.Now().Add(-reissueWaitTime)),
+						Status:                          acmtypes.CertificateStatusPendingValidation,
+					}}, nil)
+				mockACM.EXPECT().ListTagsForCertificate(gomock.Any(), gomock.Eq(&acm.ListTagsForCertificateInput{
+					CertificateArn: awssdk.String("arn-1"),
+				})).Return(&acm.ListTagsForCertificateOutput{Tags: []acmtypes.Tag{
+					{Key: awssdk.String("foo"), Value: awssdk.String("amazon_issued/example.com")},
+				}}, nil)
+				mockTracking.EXPECT().ResourceIDTagKey().Return("foo")
+				mockTracking.EXPECT().ResourceTags(gomock.Any(), gomock.Any(), gomock.Any()).
+					Return(map[string]string{"foo": "bar"})
+
+				// Delete uses plain Delete (no Route53)
+				mockACM.EXPECT().DeleteCertificateWithContext(gomock.Any(), gomock.Eq(&acm.DeleteCertificateInput{
+					CertificateArn: awssdk.String("arn-1"),
+				})).Return(&acm.DeleteCertificateOutput{}, nil)
+
+				// Create uses plain RequestCertificate (no Route53 pre-check or CNAME writes)
+				mockACM.EXPECT().RequestCertificateWithContext(gomock.Any(), gomock.Eq(&acm.RequestCertificateInput{
+					DomainName:              awssdk.String("example.com"),
+					ValidationMethod:        acmtypes.ValidationMethodDns,
+					SubjectAlternativeNames: []string{"example.com"},
+					Tags:                    []acmtypes.Tag{{Key: awssdk.String("foo"), Value: awssdk.String("bar")}},
+				})).Return(&acm.RequestCertificateOutput{CertificateArn: awssdk.String("arn-2")}, nil)
+				mockACM.EXPECT().WaitForCertificateIssuedWithContext(gomock.Any(), gomock.Eq("arn-2"), gomock.AssignableToTypeOf(time.Second)).Return(nil)
+			},
+			checkStack: func(s core.Stack) {
+				var resCerts []*acmModel.Certificate
+				err := s.ListResources(&resCerts)
+				assert.NoError(t, err)
+				assert.Len(t, resCerts, 1)
+				arn, err := resCerts[0].CertificateARN().Resolve(t.Context())
+				assert.NoError(t, err)
+				assert.Equal(t, "arn-2", arn)
+			},
+		},
+		{
+			name:              "skip-DNS controller flag: orphaned cert deleted without Route53 in PostSynthesize",
+			skipDNSValidation: true,
+			setup: func(s core.Stack, mockACM *services.MockACM, mockRoute53 *services.MockRoute53, mockTracking *tracking.MockProvider) {
+				// No resource certs on the stack — the SDK cert is orphaned
+				mockTracking.EXPECT().StackTags(gomock.Any()).Return(map[string]string{"foo": "bar"})
+				mockTracking.EXPECT().StackTagsLegacy(gomock.Any()).Return(map[string]string(nil))
+				mockACM.EXPECT().ListCertificatesAsList(gomock.Any(), gomock.Eq(&acm.ListCertificatesInput{})).
+					Return([]acmtypes.CertificateSummary{{
+						CertificateArn:                  awssdk.String("arn-1"),
+						DomainName:                      awssdk.String("example.com"),
+						SubjectAlternativeNameSummaries: []string{"example.com"},
+						Type:                            acmtypes.CertificateTypeAmazonIssued,
+						Status:                          acmtypes.CertificateStatusIssued,
+					}}, nil)
+				mockACM.EXPECT().ListTagsForCertificate(gomock.Any(), gomock.Eq(&acm.ListTagsForCertificateInput{
+					CertificateArn: awssdk.String("arn-1"),
+				})).Return(&acm.ListTagsForCertificateOutput{Tags: []acmtypes.Tag{
+					{Key: awssdk.String("foo"), Value: awssdk.String("amazon_issued/example.com")},
+				}}, nil)
+				mockTracking.EXPECT().ResourceIDTagKey().Return("foo")
+			},
+			checkStack: func(s core.Stack) {
+				var resCerts []*acmModel.Certificate
+				err := s.ListResources(&resCerts)
+				assert.NoError(t, err)
+				assert.Len(t, resCerts, 0)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := core.NewDefaultStack(core.StackID{Namespace: "namespace", Name: "name"})
+			mockACM := services.NewMockACM(ctrl)
+			mockRoute53 := services.NewMockRoute53(ctrl)
+			mockTracking := tracking.NewMockProvider(ctrl)
+
+			tt.setup(s, mockACM, mockRoute53, mockTracking)
+
+			m := &defaultCertificateManager{
+				acmClient:        mockACM,
+				route53Client:    mockRoute53,
+				logger:           logger,
+				trackingProvider: mockTracking,
+			}
+
+			c := &certificateSynthesizer{
+				certificateManager: m,
+				logger:             logger,
+				stack:              s,
+				skipDNSValidation:  tt.skipDNSValidation,
+				taggingManager: &defaultTaggingManager{
+					acmClient:            mockACM,
+					logger:               logger,
+					resourceTagsCache:    cache.NewExpiring(),
+					resourceTagsCacheTTL: defaultResourceTagsCacheTTL,
+				},
+				trackingProvider: mockTracking,
+			}
+
+			err := c.Synthesize(t.Context())
+			if tt.wantErr == nil {
+				assert.NoError(t, err)
+			} else {
+				assert.EqualError(t, tt.wantErr, err.Error())
+			}
+
+			tt.checkStack(s)
+		})
+	}
+}
+
+func Test_Synthesizer_PostSynthesize_SkipDNSValidation(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	logger := logr.New(&log.NullLogSink{})
+
+	// When controller flag=true and an orphaned AMAZON_ISSUED cert is deleted in PostSynthesize,
+	// only plain Delete (no Route53) should be called.
+	t.Run("controller flag=true uses plain Delete for orphaned cert", func(t *testing.T) {
+		s := core.NewDefaultStack(core.StackID{Namespace: "namespace", Name: "name"})
+		mockACM := services.NewMockACM(ctrl)
+		mockRoute53 := services.NewMockRoute53(ctrl)
+		mockTracking := tracking.NewMockProvider(ctrl)
+
+		orphan := CertificateWithTags{
+			Certificate: &acmtypes.CertificateSummary{
+				CertificateArn: awssdk.String("arn-orphan"),
+				Type:           acmtypes.CertificateTypeAmazonIssued,
+			},
+			Tags: map[string]string{"foo": "orphan"},
+		}
+
+		// Only plain Delete — no DescribeCertificate or Route53 calls
+		mockACM.EXPECT().DeleteCertificateWithContext(gomock.Any(), gomock.Eq(&acm.DeleteCertificateInput{
+			CertificateArn: awssdk.String("arn-orphan"),
+		})).Return(&acm.DeleteCertificateOutput{}, nil)
+
+		m := &defaultCertificateManager{
+			acmClient:        mockACM,
+			route53Client:    mockRoute53,
+			logger:           logger,
+			trackingProvider: mockTracking,
+		}
+
+		c := &certificateSynthesizer{
+			certificateManager: m,
+			logger:             logger,
+			stack:              s,
+			skipDNSValidation:  true,
+			taggingManager: &defaultTaggingManager{
+				acmClient:            mockACM,
+				logger:               logger,
+				resourceTagsCache:    cache.NewExpiring(),
+				resourceTagsCacheTTL: defaultResourceTagsCacheTTL,
+			},
+			trackingProvider: mockTracking,
+			toDeleteCerts:    []CertificateWithTags{orphan},
+		}
+
+		err := c.PostSynthesize(t.Context())
+		assert.NoError(t, err)
+	})
+}
+
 func Test_matchResAndSDKCertificates(t *testing.T) {
 	stack := core.NewDefaultStack(core.StackID{Namespace: "namespace", Name: "name"})
 

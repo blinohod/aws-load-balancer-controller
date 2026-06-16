@@ -67,6 +67,8 @@ func (t *defaultModelBuildTask) buildCertificateSpec(ctx context.Context, ing *C
 		certType = acmtypes.CertificateTypeAmazonIssued
 	}
 
+	skipDNSValidation := t.buildCertificateSkipDNSValidation(ctx, ing)
+
 	return &acmModel.CertificateSpec{
 		Type:                    certType,
 		CertificateAuthorityARN: caArn,
@@ -74,7 +76,22 @@ func (t *defaultModelBuildTask) buildCertificateSpec(ctx context.Context, ing *C
 		SubjectAlternativeNames: hosts,
 		ValidationMethod:        acmtypes.ValidationMethodDns, // currently we only support DNS based validation for AMAZON_ISSUED certificates
 		Tags:                    tags,
+		SkipDNSValidation:       skipDNSValidation,
 	}, nil
+}
+
+// buildCertificateSkipDNSValidation returns true when Route53 management should be skipped.
+// The controller-level flag takes precedence; the per-Ingress annotation is only evaluated
+// when the flag is false.
+func (t *defaultModelBuildTask) buildCertificateSkipDNSValidation(_ context.Context, ing *ClassifiedIngress) bool {
+	if t.acmCertSkipDNSValidation {
+		return true
+	}
+	var manageDNS bool
+	if exists, _ := t.annotationParser.ParseBoolAnnotation(annotations.IngressSuffixManageACMDNSValidation, &manageDNS, ing.Ing.Annotations); exists {
+		return !manageDNS
+	}
+	return false
 }
 
 func (t *defaultModelBuildTask) buildCertificateHosts(_ context.Context, ing *ClassifiedIngress) []string {

@@ -27,14 +27,15 @@ const (
 	deleteWaitInterval = 5 * time.Second
 )
 
-// NewCertificateSynthesizer( constructs new certificateSynthesizer
-func NewCertificateSynthesizer(certificateManager CertificateManager, trackingProvider tracking.Provider, taggingManager TaggingManager, logger logr.Logger, stack core.Stack) *certificateSynthesizer {
+// NewCertificateSynthesizer constructs new certificateSynthesizer
+func NewCertificateSynthesizer(certificateManager CertificateManager, trackingProvider tracking.Provider, taggingManager TaggingManager, logger logr.Logger, stack core.Stack, skipDNSValidation bool) *certificateSynthesizer {
 	return &certificateSynthesizer{
 		certificateManager: certificateManager,
 		trackingProvider:   trackingProvider,
 		taggingManager:     taggingManager,
 		logger:             logger,
 		stack:              stack,
+		skipDNSValidation:  skipDNSValidation,
 	}
 }
 
@@ -45,6 +46,9 @@ type certificateSynthesizer struct {
 	logger             logr.Logger
 	stack              core.Stack
 	toDeleteCerts      []CertificateWithTags
+	// skipDNSValidation is the controller-level flag; when true, Route53 is never called
+	// regardless of per-cert SkipDNSValidation values.
+	skipDNSValidation bool
 }
 
 func (c *certificateSynthesizer) Synthesize(ctx context.Context) error {
@@ -71,7 +75,7 @@ func (c *certificateSynthesizer) Synthesize(ctx context.Context) error {
 	for _, cert := range unmatchedResCerts {
 		var certStatus *acmModel.CertificateStatus
 		var err error
-		if cert.Spec.Type == acmtypes.CertificateTypeAmazonIssued {
+		if cert.Spec.Type == acmtypes.CertificateTypeAmazonIssued && !cert.Spec.SkipDNSValidation {
 			certStatus, err = c.certificateManager.CreateWithValidationRecords(ctx, cert)
 		} else {
 			certStatus, err = c.certificateManager.Create(ctx, cert)
@@ -96,7 +100,7 @@ func (c *certificateSynthesizer) Synthesize(ctx context.Context) error {
 		if cert.sdkCert.Certificate.Status != acmtypes.CertificateStatusIssued {
 			if cert.sdkCert.Certificate.CreatedAt.Add(reissueWaitTime).Compare(time.Now()) < 0 {
 				// certs not yet issued can't be in-use yet, so we can recreate them without retry
-				if cert.sdkCert.Certificate.Type == acmtypes.CertificateTypeAmazonIssued {
+				if cert.sdkCert.Certificate.Type == acmtypes.CertificateTypeAmazonIssued && !cert.resCert.Spec.SkipDNSValidation {
 					err = c.certificateManager.DeleteWithValidationRecords(ctx, awssdk.ToString(cert.sdkCert.Certificate.CertificateArn))
 					if err != nil {
 						return err
@@ -136,7 +140,7 @@ func (c *certificateSynthesizer) PostSynthesize(ctx context.Context) error {
 	for _, cert := range c.toDeleteCerts {
 		if err := runtime.RetryImmediateOnError(deleteWaitInterval, deleteWaitTimeout, isInUseError, func() error {
 			var err error
-			if cert.Certificate.Type == acmtypes.CertificateTypeAmazonIssued {
+			if cert.Certificate.Type == acmtypes.CertificateTypeAmazonIssued && !c.skipDNSValidation {
 				err = c.certificateManager.DeleteWithValidationRecords(ctx, awssdk.ToString(cert.Certificate.CertificateArn))
 			} else {
 				err = c.certificateManager.Delete(ctx, awssdk.ToString(cert.Certificate.CertificateArn))

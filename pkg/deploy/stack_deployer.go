@@ -140,7 +140,7 @@ func (d *defaultStackDeployer) Deploy(ctx context.Context, stack core.Stack, met
 
 	// it's important that this synthesizer is called before the ListenerSynthesizer, due to the dependency
 	if d.featureGates.Enabled(config.EnableCertificateManagement) {
-		synthesizers = append(synthesizers, acm.NewCertificateSynthesizer(d.acmManager, d.trackingProvider, d.acmTaggingManager, d.logger, stack))
+		synthesizers = append(synthesizers, acm.NewCertificateSynthesizer(d.acmManager, d.trackingProvider, d.acmTaggingManager, d.logger, stack, d.controllerConfig.IngressConfig.ACMCertSkipDNSValidation))
 	}
 
 	synthesizers = append(synthesizers,

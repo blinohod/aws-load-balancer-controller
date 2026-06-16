@@ -61,7 +61,7 @@ func NewDefaultModelBuilder(k8sClient client.Client, eventRecorder record.EventR
 	trackingProvider tracking.Provider, elbv2TaggingManager elbv2deploy.TaggingManager, featureGates config.FeatureGates,
 	vpcID string, clusterName string, defaultTags map[string]string, externalManagedTags []string, defaultSSLPolicy string, defaultTargetType string, defaultLoadBalancerScheme string,
 	backendSGProvider networkingpkg.BackendSGProvider, sgResolver networkingpkg.SecurityGroupResolver,
-	enableBackendSG bool, defaultEnableManageBackendSGRules bool, disableRestrictedSGRules bool, allowedCAARNs []string, enableIPTargetType bool, enableACMCertificates bool, defaultCAArn string, targetGroupNameToArnMapper shared_utils.TargetGroupARNMapper, logger logr.Logger, metricsCollector lbcmetrics.MetricCollector,
+	enableBackendSG bool, defaultEnableManageBackendSGRules bool, disableRestrictedSGRules bool, allowedCAARNs []string, enableIPTargetType bool, enableACMCertificates bool, acmCertSkipDNSValidation bool, defaultCAArn string, targetGroupNameToArnMapper shared_utils.TargetGroupARNMapper, logger logr.Logger, metricsCollector lbcmetrics.MetricCollector,
 	certDiscovery certs.CertDiscovery,
 ) *defaultModelBuilder {
 	ruleOptimizer := NewDefaultRuleOptimizer(logger)
@@ -93,6 +93,7 @@ func NewDefaultModelBuilder(k8sClient client.Client, eventRecorder record.EventR
 		enableBackendSG:            enableBackendSG,
 		enableManageBackendSGRules: defaultEnableManageBackendSGRules,
 		enableACMCertificates:      enableACMCertificates,
+		acmCertSkipDNSValidation:  acmCertSkipDNSValidation,
 		disableRestrictedSGRules:   disableRestrictedSGRules,
 		enableIPTargetType:         enableIPTargetType,
 		targetGroupNameToArnMapper: targetGroupNameToArnMapper,
@@ -136,8 +137,9 @@ type defaultModelBuilder struct {
 	enableBackendSG            bool
 	enableManageBackendSGRules bool
 	enableACMCertificates      bool
-	disableRestrictedSGRules   bool
-	enableIPTargetType         bool
+	acmCertSkipDNSValidation  bool
+	disableRestrictedSGRules  bool
+	enableIPTargetType        bool
 	targetGroupNameToArnMapper shared_utils.TargetGroupARNMapper
 	webACLNameToArnMapper      *webACLNameToArnMapper
 
@@ -173,6 +175,7 @@ func (b *defaultModelBuilder) Build(ctx context.Context, ingGroup Group, metrics
 		enableBackendSG:            b.enableBackendSG,
 		enableManageBackendSGRules: b.enableManageBackendSGRules,
 		enableACMCertificates:      b.enableACMCertificates,
+		acmCertSkipDNSValidation:  b.acmCertSkipDNSValidation,
 		disableRestrictedSGRules:   b.disableRestrictedSGRules,
 		enableIPTargetType:         b.enableIPTargetType,
 		metricsCollector:           b.metricsCollector,
@@ -253,8 +256,9 @@ type defaultModelBuildTask struct {
 	stack                      core.Stack
 	backendSGIDToken           core.StringToken
 	backendSGAllocated         bool
-	enableACMCertificates      bool
-	enableBackendSG            bool
+	enableACMCertificates     bool
+	acmCertSkipDNSValidation bool
+	enableBackendSG           bool
 	enableManageBackendSGRules bool
 	disableRestrictedSGRules   bool
 	enableIPTargetType         bool
